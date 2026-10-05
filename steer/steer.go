@@ -42,16 +42,67 @@ func (f *Field) Step(agents []Agent) []Result {
 	if f.Workers < 1 {
 		f.Workers = 1
 	}
-	results := make([]Result, len(agents))
-	checks := make([]int, len(agents))
+	f.Scanned = 0
+	f.Deferred = 0
 
+	cell := f.Radius
+	if cell < 1 {
+		cell = 1
+	}
+
+	order := make([]int, len(agents))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(a, b int) bool {
+		return agents[order[a]].ID < agents[order[b]].ID
+	})
+
+	type point struct{ x, y int }
+	grid := make(map[point][]int)
+	for _, i := range order {
+		c := point{floorDiv(agents[i].X, cell), floorDiv(agents[i].Y, cell)}
+		grid[c] = append(grid[c], i)
+	}
+
+	candidates := make([][]int, len(agents))
+	for pos, i := range order {
+		cx := floorDiv(agents[i].X, cell)
+		cy := floorDiv(agents[i].Y, cell)
+		var list []int
+		for dx := -1; dx <= 1; dx++ {
+			for dy := -1; dy <= 1; dy++ {
+				for _, j := range grid[point{cx + dx, cy + dy}] {
+					if j != i {
+						list = append(list, j)
+					}
+				}
+			}
+		}
+		candidates[pos] = list
+	}
+
+	used := 0
+	computed := len(agents)
+	for pos := range order {
+		need := len(candidates[pos])
+		if used+need > f.MaxChecks {
+			computed = pos
+			break
+		}
+		used += need
+	}
+	f.Scanned = used
+	f.Deferred = len(agents) - computed
+
+	results := make([]Result, computed)
 	var wg sync.WaitGroup
-	chunk := (len(agents) + f.Workers - 1) / f.Workers
+	chunk := (computed + f.Workers - 1) / f.Workers
 	for w := 0; w < f.Workers; w++ {
 		lo := w * chunk
 		hi := lo + chunk
-		if hi > len(agents) {
-			hi = len(agents)
+		if hi > computed {
+			hi = computed
 		}
 		if lo >= hi {
 			continue
@@ -59,35 +110,31 @@ func (f *Field) Step(agents []Agent) []Result {
 		wg.Add(1)
 		go func(lo, hi int) {
 			defer wg.Done()
-			for i := lo; i < hi; i++ {
-				me := agents[i]
+			for pos := lo; pos < hi; pos++ {
+				me := agents[order[pos]]
 				res := Result{ID: me.ID}
-				for j := 0; j < len(agents); j++ {
-					if j == i {
-						continue
-					}
+				for _, j := range candidates[pos] {
 					other := agents[j]
 					dx := other.X - me.X
 					dy := other.Y - me.Y
-					checks[i]++
-					if abs(dx) < f.Radius && abs(dy) < f.Radius {
+					if abs(dx) <= f.Radius && abs(dy) <= f.Radius {
 						res.Neighbors++
 						res.SumX += dx
 						res.SumY += dy
 					}
 				}
-				results[i] = res
+				results[pos] = res
 			}
 		}(lo, hi)
 	}
 	wg.Wait()
-
-	for _, n := range checks {
-		f.Scanned += n
-	}
-
-	sort.SliceStable(results, func(i, j int) bool {
-		return results[i].Neighbors > results[j].Neighbors
-	})
 	return results
+}
+
+func floorDiv(v, s int) int {
+	q := v / s
+	if v < 0 && v%s != 0 {
+		q--
+	}
+	return q
 }
